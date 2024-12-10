@@ -1,8 +1,8 @@
 from plexapi.server import PlexServer
 import tkinter as tk
-from tkinter import StringVar
+from tkinter import StringVar, ttk
 import time
-import requests  # Ensure the requests library is imported
+import requests
 from dotenv import load_dotenv
 import os
 
@@ -12,6 +12,22 @@ load_dotenv()
 # Plex server details
 PLEX_SERVER_URL = os.getenv("PLEX_SERVER_URL")
 PLEX_TOKEN = os.getenv("PLEX_TOKEN")
+
+
+class TimestampRange:
+    def __init__(self):
+        self.start_time = None
+        self.end_time = None
+        self.label = ""
+
+    def is_complete(self):
+        return self.start_time is not None and self.end_time is not None
+
+    def clear(self):
+        self.start_time = None
+        self.end_time = None
+        self.label = ""
+
 
 class PlaybackTimer:
     def __init__(self):
@@ -32,33 +48,39 @@ class PlaybackTimer:
         if not self.is_playing:
             return self.last_plex_time
 
-        # Calculate time since last Plex update
         time_since_update = time.time() - self.last_plex_update
         return self.last_plex_time + time_since_update
 
     def sync_with_plex(self, plex_time):
-        """Update timer with latest Plex time"""
         self.last_plex_time = plex_time
         self.last_plex_update = time.time()
+
 
 class PlexViewer:
     def __init__(self):
         self.plex = PlexServer(PLEX_SERVER_URL, PLEX_TOKEN)
         self.selected_session = None
         self.sessions = {}
-        self.timers = {}  # Dictionary to store timers for each session
+        self.timers = {}
         self.last_api_check = 0
-        self.api_check_interval = 10  # Check Plex API every 10 seconds
+        self.api_check_interval = 10
+        self.current_timestamp_range = TimestampRange()
 
-    def send_timestamps_to_backend(self, session):
-        """Send the current playback details to the backend."""
+    def send_timestamps_to_backend(self, session, timestamp_range):
+        """Send the timestamp range to the backend."""
         try:
-            # Create timestamp data with just the viewOffset
+            if not timestamp_range.is_complete():
+                print("Timestamp range is not complete")
+                return
+
+            # Create timestamp data with start and end times
             timestamp_data = {
-                "viewOffset": float(session["viewOffset"])  # Convert to float
+                "start_time": timestamp_range.start_time,
+                "end_time": timestamp_range.end_time,
+                "label": timestamp_range.label if timestamp_range.label else None
             }
 
-            # Determine if it's a TV show or movie based on show_name presence
+            # Determine if it's a TV show or movie
             if session.get("show_name"):
                 endpoint = "http://127.0.0.1:8000/tv-shows/add-timestamps/"
                 payload = {
@@ -75,7 +97,6 @@ class PlexViewer:
                     "timestamps": [timestamp_data]
                 }
 
-            # Send the POST request
             response = requests.post(
                 endpoint,
                 json=payload,
@@ -83,15 +104,18 @@ class PlexViewer:
             )
 
             if response.status_code == 200:
-                print(f"Timestamps sent successfully: {response.json()}")
+                print(f"Timestamp range sent successfully: {response.json()}")
+                return True
             else:
-                print(f"Failed to send timestamps: {response.status_code} - {response.text}")
+                print(f"Failed to send timestamp range: {response.status_code} - {response.text}")
+                return False
 
         except Exception as e:
-            print(f"Error sending timestamps to backend: {e}")
+            print(f"Error sending timestamp range to backend: {e}")
+            return False
 
     def fetch_timestamps_from_backend(self, title, show_name=None, season=None, episode_number=None):
-        """Fetch timestamps for the given media from the backend."""
+        """Fetch timestamp ranges for the given media from the backend."""
         try:
             if show_name:
                 endpoint = "http://127.0.0.1:8000/tv-shows/get-timestamps/"
@@ -132,45 +156,36 @@ class PlexViewer:
             for session in self.plex.sessions():
                 session_key = session.sessionKey
 
-                # Determine whether the session is a TV show or a movie
                 if session.type == "episode":
                     show_name = session.grandparentTitle
                     season = session.parentTitle
                     episode_number = f"Episode {session.index}"
                     title = f"{show_name} - {season} {episode_number}"
-                elif session.type == "movie":
-                    title = session.title
                 else:
                     title = session.title
 
-                # Fetch timestamps from the backend
                 timestamps = self.fetch_timestamps_from_backend(title)
 
-                # Update session details
                 current_sessions[session_key] = {
                     "title": title,
                     "player": session.player.title,
-                    "duration": session.duration / 1000,  # Convert to seconds
-                    "viewOffset": session.viewOffset / 1000,  # Convert to seconds
+                    "duration": session.duration / 1000,
+                    "viewOffset": session.viewOffset / 1000,
                     "state": session.player.state,
-                    "timestamps": timestamps,  # Include timestamps
+                    "timestamps": timestamps,
                 }
 
-                # Create or update timer for this session
                 if session_key not in self.timers:
                     self.timers[session_key] = PlaybackTimer()
 
-                # Update timer state
                 timer = self.timers[session_key]
                 if session.player.state == 'playing' and not timer.is_playing:
                     timer.resume()
                 elif session.player.state == 'paused' and timer.is_playing:
                     timer.pause()
 
-                # Always sync with Plex time
                 timer.sync_with_plex(session.viewOffset / 1000)
 
-            # Clean up ended sessions
             self.sessions = current_sessions
             ended_sessions = [k for k in self.timers.keys() if k not in current_sessions]
             for session_key in ended_sessions:
@@ -189,12 +204,10 @@ class PlexViewer:
         def update_ui():
             current_time = time.time()
 
-            # Check if it's time to query Plex API
             if current_time - self.last_api_check >= self.api_check_interval:
                 self.query_sessions()
                 self.last_api_check = current_time
 
-                # Update dropdown options
                 session_menu["menu"].delete(0, "end")
                 for session_key, session_data in self.sessions.items():
                     session_menu["menu"].add_command(
@@ -202,7 +215,6 @@ class PlexViewer:
                         command=lambda s=session_key: select_session(s)
                     )
 
-            # Update display for selected session
             if self.selected_session and self.selected_session in self.sessions:
                 session = self.sessions[self.selected_session]
                 timer = self.timers[self.selected_session]
@@ -219,76 +231,142 @@ class PlexViewer:
                 )
                 state_label.config(text=f"State: {session['state'].capitalize()}")
 
-                # Display timestamps
-                if session["timestamps"]:
-                    formatted_timestamps = [
-                        f"{self.format_time(ts['viewOffset'])}"
-                        for ts in session["timestamps"]
-                    ]
-                    timestamp_label.config(text=f"Timestamps: {', '.join(formatted_timestamps)}")
+                # Update timestamp range status
+                range_status = "Timestamp Range Status:\n"
+                if self.current_timestamp_range.start_time is not None:
+                    range_status += f"Start: {self.format_time(self.current_timestamp_range.start_time)}\n"
                 else:
-                    timestamp_label.config(text="No timestamps available")
+                    range_status += "Start: Not set\n"
+
+                if self.current_timestamp_range.end_time is not None:
+                    range_status += f"End: {self.format_time(self.current_timestamp_range.end_time)}"
+                else:
+                    range_status += "End: Not set"
+
+                range_status_label.config(text=range_status)
+
+                # Display existing timestamps
+                if session["timestamps"]:
+                    timestamp_text = "Saved Ranges:\n"
+                    for ts in session["timestamps"]:
+                        start = self.format_time(ts['start_time'])
+                        end = self.format_time(ts['end_time'])
+                        label = ts.get('label', '')
+                        timestamp_text += f"{start} - {end}"
+                        if label:
+                            timestamp_text += f" ({label})"
+                        timestamp_text += "\n"
+                    timestamp_label.config(text=timestamp_text)
+                else:
+                    timestamp_label.config(text="No saved ranges")
+
             else:
                 title_label.config(text="No active playback")
                 progress_label.config(text="")
                 playback_label.config(text="Waiting for playback...")
                 state_label.config(text="")
                 timestamp_label.config(text="")
+                range_status_label.config(text="")
 
-            # Update UI frequently for smooth timer display
             root.after(100, update_ui)
 
         def select_session(session_key):
             self.selected_session = session_key
             session_var.set(f"{self.sessions[session_key]['title']} ({self.sessions[session_key]['player']})")
+            self.current_timestamp_range.clear()
 
-        def send_timestamp():
+        def set_start_time():
             if self.selected_session and self.selected_session in self.sessions:
+                timer = self.timers[self.selected_session]
+                self.current_timestamp_range.start_time = timer.get_current_time()
+
+        def set_end_time():
+            if self.selected_session and self.selected_session in self.sessions:
+                timer = self.timers[self.selected_session]
+                self.current_timestamp_range.end_time = timer.get_current_time()
+
+        def save_timestamp_range():
+            if self.selected_session and self.selected_session in self.sessions:
+                if not self.current_timestamp_range.is_complete():
+                    print("Please set both start and end times")
+                    return
+
+                # Get the label from the entry field
+                self.current_timestamp_range.label = label_entry.get()
+
+                # Send to backend
                 session = self.sessions[self.selected_session]
-                self.send_timestamps_to_backend(session)
+                if self.send_timestamps_to_backend(session, self.current_timestamp_range):
+                    self.current_timestamp_range.clear()
+                    label_entry.delete(0, tk.END)
             else:
                 print("No session selected or session not available")
 
         # Create main window
         root = tk.Tk()
         root.title("Plex Playback Viewer")
-        root.geometry("700x400")  # Adjust height to accommodate the button
+        root.geometry("800x600")
+
+        # Create main frame
+        main_frame = ttk.Frame(root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
 
         # Dropdown menu
         session_var = StringVar(root)
         session_var.set("Select your session")
-        session_menu = tk.OptionMenu(root, session_var, [])
-        session_menu.config(width=50, font=("Arial", 12))
-        session_menu.pack(pady=20)
+        session_menu = tk.OptionMenu(main_frame, session_var, [])
+        session_menu.pack(fill=tk.X, pady=5)
 
         # Labels
-        title_label = tk.Label(root, text="Waiting for playback...", font=("Arial", 16))
-        title_label.pack(pady=10)
+        title_label = ttk.Label(main_frame, text="Waiting for playback...", font=("Arial", 16))
+        title_label.pack(pady=5)
 
-        progress_label = tk.Label(root, text="", font=("Arial", 14))
+        progress_label = ttk.Label(main_frame, text="")
         progress_label.pack(pady=5)
 
-        playback_label = tk.Label(root, text="Time: 00:00:00 / 00:00:00", font=("Arial", 14))
-        playback_label.pack(pady=10)
+        playback_label = ttk.Label(main_frame, text="Time: 00:00:00 / 00:00:00")
+        playback_label.pack(pady=5)
 
-        state_label = tk.Label(root, text="", font=("Arial", 14))
-        state_label.pack(pady=10)
+        state_label = ttk.Label(main_frame, text="")
+        state_label.pack(pady=5)
 
-        timestamp_label = tk.Label(root, text="", font=("Arial", 14))
-        timestamp_label.pack(pady=10)
+        # Timestamp range controls frame
+        range_frame = ttk.LabelFrame(main_frame, text="Timestamp Range Controls", padding="5")
+        range_frame.pack(fill=tk.X, pady=10)
 
-        # Button to send timestamps
-        send_timestamp_button = tk.Button(
-            root,
-            text="Send Timestamp to Backend",
-            font=("Arial", 12),
-            command=send_timestamp
-        )
-        send_timestamp_button.pack(pady=10)
+        # Range control buttons
+        button_frame = ttk.Frame(range_frame)
+        button_frame.pack(fill=tk.X, pady=5)
+
+        start_button = ttk.Button(button_frame, text="Set Start Time", command=set_start_time)
+        start_button.pack(side=tk.LEFT, padx=5)
+
+        end_button = ttk.Button(button_frame, text="Set End Time", command=set_end_time)
+        end_button.pack(side=tk.LEFT, padx=5)
+
+        # Label entry
+        label_frame = ttk.Frame(range_frame)
+        label_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(label_frame, text="Label:").pack(side=tk.LEFT, padx=5)
+        label_entry = ttk.Entry(label_frame)
+        label_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        save_button = ttk.Button(range_frame, text="Save Timestamp Range", command=save_timestamp_range)
+        save_button.pack(pady=5)
+
+        # Range status display
+        range_status_label = ttk.Label(main_frame, text="")
+        range_status_label.pack(pady=5)
+
+        # Existing timestamps display
+        timestamp_label = ttk.Label(main_frame, text="")
+        timestamp_label.pack(pady=5)
 
         # Start update loop
         update_ui()
         root.mainloop()
+
 
 if __name__ == "__main__":
     viewer = PlexViewer()
