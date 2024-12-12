@@ -81,7 +81,7 @@ def ranges_overlap(range1: TimestampRange, range2: TimestampRange) -> bool:
 
 
 def merge_overlapping_ranges(ranges: List[TimestampRange]) -> List[TimestampRange]:
-    """Merge any overlapping timestamp ranges"""
+    """Merge any overlapping timestamp ranges with improved label handling"""
     if not ranges:
         return []
 
@@ -94,11 +94,16 @@ def merge_overlapping_ranges(ranges: List[TimestampRange]) -> List[TimestampRang
         if ranges_overlap(last, current):
             # Merge overlapping ranges
             last.end_time = max(last.end_time, current.end_time)
-            # Combine labels if they exist
-            if last.label and current.label:
-                last.label = f"{last.label}, {current.label}"
-            elif current.label:
-                last.label = current.label
+
+            # Handle labels
+            if current.label:
+                if last.label:
+                    # If both ranges have labels, combine them only if they're different
+                    if current.label != last.label:
+                        last.label = f"{last.label} | {current.label}"
+                else:
+                    # If only the current range has a label, use it
+                    last.label = current.label
         else:
             merged.append(current)
 
