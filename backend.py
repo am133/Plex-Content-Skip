@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, Column, Integer, String, JSON, UniqueConstraint
+from sqlalchemy import create_engine, Column, Integer, String, JSON, UniqueConstraint, update, and_
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from typing import Optional, List
 import sqlalchemy
@@ -28,6 +28,15 @@ class TVShow(Base):
     episode_number = Column(String)
     title = Column(String)
     timestamps = Column(JSON)  # Changed back to timestamps
+
+class UpdateTimestampRequest(BaseModel):
+    index: int
+    start_time: float
+    end_time: float
+    label: Optional[str] = None
+
+class DeleteTimestampRequest(BaseModel):
+    index: int
 
     __table_args__ = (
         UniqueConstraint('show_name', 'season', 'episode_number', name='unique_episode'),
@@ -109,6 +118,206 @@ def merge_overlapping_ranges(ranges: List[TimestampRange]) -> List[TimestampRang
 
     return merged
 
+
+@app.post("/movies/update-timestamp/")
+async def update_movie_timestamp(
+        title: str,
+        update_data: UpdateTimestampRequest,
+        db: Session = Depends(get_db)
+):
+    print(f"Updating timestamp for movie: {title}")
+    print(f"Update data received: {update_data}")
+
+    movie = db.query(Movie).filter(Movie.title == title).first()
+    if not movie:
+        raise HTTPException(status_code=404, detail="Movie not found")
+
+    if not movie.timestamps or update_data.index >= len(movie.timestamps):
+        raise HTTPException(status_code=404, detail="Timestamp index not found")
+
+    print(f"Original timestamps: {movie.timestamps}")
+
+    # Create a new list with the updated timestamp
+    timestamps = movie.timestamps.copy()
+    timestamps[update_data.index] = {
+        "start_time": float(update_data.start_time),  # Ensure float type
+        "end_time": float(update_data.end_time),  # Ensure float type
+        "label": update_data.label
+    }
+
+    print(f"Modified timestamps: {timestamps}")
+
+    # Update the movie object with the new timestamps
+    movie.timestamps = timestamps
+
+    try:
+        # Force the update by explicitly updating the timestamps column
+        db.execute(
+            update(Movie)
+            .where(Movie.title == title)
+            .values(timestamps=timestamps)
+        )
+        db.commit()
+        db.refresh(movie)
+
+        print(f"Final timestamps after commit: {movie.timestamps}")
+
+        return {
+            "message": "Timestamp updated successfully",
+            "timestamps": movie.timestamps
+        }
+    except Exception as e:
+        print(f"Error during update: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+@app.post("/movies/delete-timestamp/")
+def delete_movie_timestamp(
+        title: str,
+        delete_data: DeleteTimestampRequest,
+        db: Session = Depends(get_db)
+):
+    movie = db.query(Movie).filter(Movie.title == title).first()
+    if not movie:
+        raise HTTPException(status_code=404, detail="Movie not found")
+
+    if not movie.timestamps or delete_data.index >= len(movie.timestamps):
+        raise HTTPException(status_code=404, detail="Timestamp index not found")
+
+    # Create a new list without the deleted timestamp
+    timestamps = movie.timestamps.copy()
+    timestamps.pop(delete_data.index)
+
+    # Update using SQLAlchemy update statement
+    stmt = (
+        update(Movie)
+        .where(Movie.title == title)
+        .values(timestamps=timestamps)
+    )
+    db.execute(stmt)
+    db.commit()
+
+    # Fetch the updated movie to verify changes
+    updated_movie = db.query(Movie).filter(Movie.title == title).first()
+    return {
+        "message": "Timestamp deleted successfully",
+        "timestamps": updated_movie.timestamps
+    }
+
+
+@app.post("/tv-shows/update-timestamp/")
+async def update_tvshow_timestamp(
+        show_name: str,
+        season: str,
+        episode_number: str,
+        index: int,
+        start_time: float,
+        end_time: float,
+        label: Optional[str] = None,
+        db: Session = Depends(get_db)
+):
+    print(f"Updating timestamp for TV show: {show_name} S{season}E{episode_number}")
+
+    episode = db.query(TVShow).filter(
+        TVShow.show_name == show_name,
+        TVShow.season == season,
+        TVShow.episode_number == episode_number
+    ).first()
+
+    if not episode:
+        raise HTTPException(status_code=404, detail="TV show episode not found")
+
+    if not episode.timestamps or index >= len(episode.timestamps):
+        raise HTTPException(status_code=404, detail="Timestamp index not found")
+
+    # Create a new list with the updated timestamp
+    timestamps = episode.timestamps.copy()
+    timestamps[index] = {
+        "start_time": float(start_time),
+        "end_time": float(end_time),
+        "label": label
+    }
+
+    # Update using SQLAlchemy update statement
+    try:
+        stmt = (
+            update(TVShow)
+            .where(
+                and_(
+                    TVShow.show_name == show_name,
+                    TVShow.season == season,
+                    TVShow.episode_number == episode_number
+                )
+            )
+            .values(timestamps=timestamps)
+        )
+        db.execute(stmt)
+        db.commit()
+        db.refresh(episode)
+
+        return {
+            "message": "Timestamp updated successfully",
+            "timestamps": episode.timestamps
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+
+@app.post("/tv-shows/delete-timestamp/")
+def delete_tvshow_timestamp(
+        request: GetMediaRequest,
+        delete_data: DeleteTimestampRequest,
+        db: Session = Depends(get_db)
+):
+    if not all([request.show_name, request.season, request.episode_number]):
+        raise HTTPException(
+            status_code=400,
+            detail="show_name, season, and episode_number are required"
+        )
+
+    episode = db.query(TVShow).filter(
+        TVShow.show_name == request.show_name,
+        TVShow.season == request.season,
+        TVShow.episode_number == request.episode_number
+    ).first()
+
+    if not episode:
+        raise HTTPException(status_code=404, detail="TV show episode not found")
+
+    if not episode.timestamps or delete_data.index >= len(episode.timestamps):
+        raise HTTPException(status_code=404, detail="Timestamp index not found")
+
+    # Create a new list without the deleted timestamp
+    timestamps = episode.timestamps.copy()
+    timestamps.pop(delete_data.index)
+
+    # Update using SQLAlchemy update statement
+    stmt = (
+        update(TVShow)
+        .where(
+            and_(
+                TVShow.show_name == request.show_name,
+                TVShow.season == request.season,
+                TVShow.episode_number == request.episode_number
+            )
+        )
+        .values(timestamps=timestamps)
+    )
+    db.execute(stmt)
+    db.commit()
+
+    # Fetch the updated episode to verify changes
+    updated_episode = db.query(TVShow).filter(
+        TVShow.show_name == request.show_name,
+        TVShow.season == request.season,
+        TVShow.episode_number == request.episode_number
+    ).first()
+
+    return {
+        "message": "Timestamp deleted successfully",
+        "timestamps": updated_episode.timestamps
+    }
 
 # Movie Endpoints
 @app.post("/movies/add-timestamps/")
